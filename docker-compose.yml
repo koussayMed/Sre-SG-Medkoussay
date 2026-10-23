@@ -1,0 +1,55 @@
+# Environnement local : 3 services, comme en production.
+#   frontend (nginx, seul port publié) -> backend (Flask/gunicorn, interne) -> db (PostgreSQL)
+# Lancer : cp .env.example .env  (puis changer le mot de passe)  &&  docker compose up --build
+
+name: sre-meteo
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-meteo}
+      POSTGRES_USER: ${POSTGRES_USER:-meteo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?définir POSTGRES_PASSWORD dans .env}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${DB_HOST_PORT:-55432}:5432"  # local uniquement : tests d'intégration et psql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
+    environment:
+      APP_ENV: local
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-meteo}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-meteo}
+      WEATHER_CACHE_TTL_S: ${WEATHER_CACHE_TTL_S:-600}
+      # Pour simuler une panne de l'API météo : FORECAST_API_URL=https://invalid.example
+      FORECAST_API_URL: ${FORECAST_API_URL:-https://api.open-meteo.com/v1/forecast}
+    depends_on:
+      db:
+        condition: service_healthy
+    # Pas de port publié : le backend n'est joignable que par le frontend (comme en production)
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "8080:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  db-data:

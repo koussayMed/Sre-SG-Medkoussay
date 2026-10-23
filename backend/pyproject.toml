@@ -1,0 +1,20 @@
+[project]
+name = "meteo-api"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["."]  # rend le paquet `app` importable quel que soit le mode de lancement de pytest
+markers = ["integration: nécessite un PostgreSQL (TEST_DATABASE_URL)"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = ["S101"]  # assert est normal dans les tests
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]

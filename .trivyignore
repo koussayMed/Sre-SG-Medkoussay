@@ -1,0 +1,6 @@
+# Vulnérabilités acceptées, une par ligne, TOUJOURS avec une justification et une date de revue.
+# Le scan bloque déjà seulement sur HIGH/CRITICAL corrigeables (--ignore-unfixed) :
+# ce fichier ne sert que pour une faille corrigeable qu'on ne peut pas corriger tout de suite.
+#
+# Exemple :
+# CVE-2026-00000   # paquet X, code non utilisé par l'app ; revue le 2026-11-30

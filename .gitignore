@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets et configuration locale : seul .env.example est versionné
+.env
+.env.*
+!.env.example
+
+# Résultats bruts des tests de charge (seuls les résumés sont commités)
+loadtest/results/raw/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store

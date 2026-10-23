@@ -1,0 +1,268 @@
+# CI/CD : CI à chaque push sur main et à chaque pull request ; déploiement sur Azure à chaque push sur main.
+#   1. tests      : lint + tests unitaires + tests d'intégration contre un vrai PostgreSQL
+#   2. security   : mauvaises configurations des Dockerfiles + secrets commités par erreur
+#   3. build-scan-smoke : build des images, scan des vulnérabilités (rapport), démarrage de la
+#      stack complète et tests de fumée de bout en bout (nginx -> backend -> base)
+#   4. deploy (main uniquement) : pousse dans ACR les images EXACTES testées à l'étape 3, met à jour
+#      les Container Apps, vérifie l'URL publique, et revient à la version précédente en cas d'échec.
+# Connexion à Azure par OIDC : aucun mot de passe Azure dans GitHub (voir infra/github-oidc-setup.ps1).
+# Runners épinglés (ubuntu-24.04) : ubuntu-latest change de version sans prévenir.
+# Actions épinglées par SHA de commit (un tag peut être réécrit, cf. compromission de trivy-action en 2026).
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Une PR mise à jour annule son ancien run ; sur main, on n'interrompt jamais un déploiement en cours
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  TRIVY_IMAGE: aquasec/trivy:0.69.3 # 0.69.4 à 0.69.6 compromises (CVE-2026-33634) : ne pas utiliser latest
+
+jobs:
+  tests:
+    name: Lint et tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: meteo
+          POSTGRES_USER: meteo
+          POSTGRES_PASSWORD: meteo # base jetable, propre à ce job : pas un secret
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U meteo -d meteo"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Installer les dépendances
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Tests unitaires et d'intégration
+        env:
+          TEST_DATABASE_URL: postgresql://meteo:meteo@localhost:5432/meteo
+        run: pytest -rs # -rs : affiche les tests ignorés (un test d'intégration sauté se verrait)
+
+  security:
+    name: Configuration et secrets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Mauvaises configurations des Dockerfiles (Trivy)
+        run: >-
+          docker run --rm -v "$PWD:/src:ro" "$TRIVY_IMAGE"
+          config --severity HIGH,CRITICAL --exit-code 1 /src
+
+      - name: Secrets commités par erreur (Trivy)
+        run: >-
+          docker run --rm -v "$PWD:/src:ro" "$TRIVY_IMAGE"
+          fs --scanners secret --exit-code 1 /src
+
+  build-scan-smoke:
+    name: Build, scan des images et test de bout en bout
+    needs: [tests, security]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      APP_VERSION: ${{ github.sha }} # injectée dans l'image backend, vérifiée par le test de fumée
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Configuration CI (base jetable, valeurs non secrètes)
+        run: |
+          printf 'POSTGRES_PASSWORD=ci\nDB_HOST_PORT=55432\n' > .env
+
+      - name: Build des images
+        run: docker compose build
+
+      - name: Scan des vulnérabilités (rapport, non bloquant)
+        continue-on-error: true
+        run: |
+          for image in sre-meteo-backend sre-meteo-frontend; do
+            echo "::group::Trivy $image"
+            docker run --rm \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              -v "$PWD:/src:ro" "$TRIVY_IMAGE" \
+              image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+              --ignorefile /src/.trivyignore --exit-code 0 --no-progress "$image"
+            echo "::endgroup::"
+          done
+
+      - name: Démarrer la stack complète
+        run: docker compose up -d --wait --wait-timeout 120
+
+      - name: Tests de fumée (nginx -> backend -> base)
+        run: |
+          set -eu
+          curl -fsS http://localhost:8080/healthz
+          curl -fsS http://localhost:8080/ -o index.html && grep -q "Météo des villes" index.html
+          curl -fsSI http://localhost:8080/ -o headers.txt && grep -qi "content-security-policy" headers.txt
+          # Identifiant visiteur de test (UUID) : /api/weather renvoie la liste de ce visiteur
+          curl -fsS -H "X-Visitor-Id: 00000000-0000-4000-8000-000000000000" http://localhost:8080/api/weather -o weather.json
+          curl -fsS http://localhost:8080/api/info -o info.json
+          python3 - <<'EOF'
+          import json, os
+          info = json.load(open("info.json"))
+          assert info["version"] == os.environ["APP_VERSION"], f"mauvaise version : {info['version']}"
+          assert isinstance(json.load(open("weather.json")), list)
+          print("OK : version", info["version"], "servie par", info["instance"]["replica"])
+          EOF
+
+      - name: Exporter les images testées (pour le déploiement)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: docker save sre-meteo-backend sre-meteo-frontend | gzip -1 > images.tar.gz
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          name: images
+          path: images.tar.gz
+          retention-days: 1
+          compression-level: 0 # déjà compressé
+          if-no-files-found: error
+
+      - name: Logs en cas d'échec
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: Arrêter la stack
+        if: always()
+        run: docker compose down -v
+
+  deploy:
+    name: Déploiement sur Azure
+    needs: build-scan-smoke
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: production # historique des déploiements dans GitHub ; nom vérifié par la fédération OIDC
+      url: ${{ steps.current.outputs.app_url }}
+    permissions:
+      contents: read
+      id-token: write # jeton OIDC échangé contre un accès Azure de courte durée
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    env:
+      RESOURCE_GROUP: rg-sre-meteo
+      ACR_NAME: acrsremeteokoussay
+      BACKEND_APP: meteo-backend
+      FRONTEND_APP: meteo-frontend
+      TAG: ${{ github.sha }} # image = commit : on sait toujours quel code tourne
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: images
+
+      - name: Charger les images testées
+        run: gunzip -c images.tar.gz | docker load
+
+      - name: Connexion à Azure (OIDC, sans secret)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Pousser les images dans le registre
+        run: |
+          set -eu
+          az acr login --name "$ACR_NAME"
+          registry="$ACR_NAME.azurecr.io"
+          for service in backend frontend; do
+            docker tag "sre-meteo-$service" "$registry/meteo-$service:$TAG"
+            docker push "$registry/meteo-$service:$TAG"
+          done
+          echo "REGISTRY=$registry" >> "$GITHUB_ENV"
+
+      - name: Mémoriser la version en production (pour revenir en arrière)
+        id: current
+        run: |
+          set -eu
+          az extension add --name containerapp --upgrade --only-show-errors
+          image() { az containerapp show --only-show-errors -n "$1" -g "$RESOURCE_GROUP" --query "properties.template.containers[0].image" -o tsv; }
+          echo "PREVIOUS_BACKEND_IMAGE=$(image "$BACKEND_APP")" >> "$GITHUB_ENV"
+          echo "PREVIOUS_FRONTEND_IMAGE=$(image "$FRONTEND_APP")" >> "$GITHUB_ENV"
+          fqdn=$(az containerapp show --only-show-errors -n "$FRONTEND_APP" -g "$RESOURCE_GROUP" --query properties.configuration.ingress.fqdn -o tsv)
+          echo "app_url=https://$fqdn" >> "$GITHUB_OUTPUT"
+          echo "APP_URL=https://$fqdn" >> "$GITHUB_ENV"
+          echo "En production avant déploiement : $(image "$BACKEND_APP") / $(image "$FRONTEND_APP")"
+
+      - name: Déployer (backend puis frontend)
+        run: |
+          set -eu
+          # Attend que la nouvelle révision soit prête. Pendant ce temps, l'ancienne continue de servir
+          # le trafic (mode révision unique : bascule seulement quand la nouvelle passe ses sondes).
+          wait_ready() {
+            for _ in $(seq 1 36); do
+              latest=$(az containerapp show --only-show-errors -n "$1" -g "$RESOURCE_GROUP" --query properties.latestRevisionName -o tsv)
+              ready=$(az containerapp show --only-show-errors -n "$1" -g "$RESOURCE_GROUP" --query properties.latestReadyRevisionName -o tsv)
+              if [ "$latest" = "$ready" ]; then echo "$1 : révision $latest prête"; return 0; fi
+              sleep 10
+            done
+            echo "::error::$1 : la révision $latest n'est pas devenue prête en 6 minutes"
+            return 1
+          }
+          # Backend d'abord : il applique les migrations, le nouveau front peut ensuite s'appuyer dessus
+          az containerapp update --only-show-errors -n "$BACKEND_APP" -g "$RESOURCE_GROUP" --image "$REGISTRY/meteo-backend:$TAG" -o none
+          wait_ready "$BACKEND_APP"
+          az containerapp update --only-show-errors -n "$FRONTEND_APP" -g "$RESOURCE_GROUP" --image "$REGISTRY/meteo-frontend:$TAG" -o none
+          wait_ready "$FRONTEND_APP"
+
+      - name: Tests de fumée sur l'URL publique
+        run: |
+          set -eu
+          # La bonne version doit répondre (le trafic bascule quelques secondes après la révision prête)
+          for _ in $(seq 1 30); do
+            version=$(curl -fsS "$APP_URL/api/info" | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])" || true)
+            [ "$version" = "$TAG" ] && break
+            sleep 5
+          done
+          [ "$version" = "$TAG" ] || { echo "::error::version servie : '$version', attendue : $TAG"; exit 1; }
+          curl -fsS "$APP_URL/healthz"
+          curl -fsS "$APP_URL/" | grep -q "Météo des villes"
+          curl -fsSI "$APP_URL/" | grep -qi "content-security-policy"
+          curl -fsS -H "X-Visitor-Id: 00000000-0000-4000-8000-000000000000" "$APP_URL/api/weather" \
+            | python3 -c "import json,sys; assert isinstance(json.load(sys.stdin), list)"
+          echo "### Déployé : \`$TAG\` sur $APP_URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Revenir à la version précédente
+        if: failure() && env.PREVIOUS_BACKEND_IMAGE != ''
+        run: |
+          echo "::warning::Échec du déploiement : retour à $PREVIOUS_BACKEND_IMAGE et $PREVIOUS_FRONTEND_IMAGE"
+          az containerapp update --only-show-errors -n "$BACKEND_APP" -g "$RESOURCE_GROUP" --image "$PREVIOUS_BACKEND_IMAGE" -o none
+          az containerapp update --only-show-errors -n "$FRONTEND_APP" -g "$RESOURCE_GROUP" --image "$PREVIOUS_FRONTEND_IMAGE" -o none
+          echo "### Échec : retour à la version précédente (\`$PREVIOUS_BACKEND_IMAGE\`)" >> "$GITHUB_STEP_SUMMARY"
