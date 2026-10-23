@@ -21,7 +21,7 @@ $Environment = "production"             # environnement GitHub du job de deploie
 # Sujet exact du jeton GitHub, visible dans les logs de l'etape azure/login ("subject claim").
 # GitHub y inclut les identifiants numeriques du proprietaire et du depot : un depot supprime puis
 # recree avec le meme nom n'herite donc pas de la confiance. Nouveau depot = relancer ce script.
-$GitHubSubject = "repo:koussayMed@147982194/Sre-SG-Medkoussay@1431466046:environment:$Environment"
+$GitHubSubject = "repo:koussayMed@147982194/Sre-SG-Medkoussay@1431482311:environment:$Environment"
 $Suffix      = "koussay"
 $Rg          = "rg-sre-meteo"
 $Acr         = "acrsremeteo$Suffix"
