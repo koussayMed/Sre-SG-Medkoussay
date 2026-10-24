@@ -38,11 +38,11 @@ ContainerAppConsoleLogs_CL
 
 
 // 4. Suivre UNE requête de bout en bout : nginx -> Flask -> appels à Open-Meteo
-// Le request_id se trouve dans l'en-tête de réponse X-Request-ID (outils du navigateur, onglet Réseau)
-// ou dans le corps de toute réponse d'erreur JSON.
-let rid = "COLLER-ICI-LE-REQUEST-ID";
+// L'identifiant est la « référence » affichée par l'UI dans les messages d'erreur (8 premiers caractères),
+// ou l'en-tête de réponse X-Request-ID complet (outils du navigateur, onglet Réseau).
+let rid = "COLLER-ICI-LA-REFERENCE";
 ContainerAppConsoleLogs_CL
-| where TimeGenerated > ago(1d) and Log_s has rid
+| where TimeGenerated > ago(1d) and Log_s contains rid
 | extend e = parse_json(Log_s)
 | project TimeGenerated, service = ContainerAppName_s, replica = ContainerGroupName_s,
     message = tostring(e.message), status = toint(e.status), duree_ms = todouble(e.duration_ms),

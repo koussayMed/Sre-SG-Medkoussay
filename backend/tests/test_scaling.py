@@ -83,6 +83,22 @@ def test_refresh_lease_prevents_concurrent_api_calls(repo, weather_client):
     assert weather_client.weather_calls == calls_before  # pas d'appel en double à l'API
 
 
+def test_circuit_open_serves_stale_without_taking_the_lease(repo, weather_client):
+    # Pendant une panne connue, la source est « stale » (pas « refreshing ») et aucun bail n'est pris
+    service = WeatherService(repo, weather_client, ttl_s=600)
+    _add(repo, 1)
+    city = repo.cities[1]
+    service.weather_for(city)
+    _expire_all(repo)
+    for _ in range(weather_client.breaker.failure_threshold):
+        weather_client.breaker.record_failure()
+    calls_before = weather_client.weather_calls
+    weather, source = service.weather_for(city)
+    assert source == "stale" and weather is not None
+    assert weather_client.weather_calls == calls_before
+    assert city.id not in repo.leases
+
+
 def test_refresh_releases_lease_after_save(repo, weather_client):
     service = WeatherService(repo, weather_client, ttl_s=600)
     _add(repo, 1)

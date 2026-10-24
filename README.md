@@ -312,11 +312,13 @@ source de la météo de chaque ville.
 
 | Action | Ce qui est simulé | Comportement attendu |
 |---|---|---|
-| `api-panne` | Open-Meteo injoignable (adresses `.invalid`) et cache expiré | villes affichées avec la dernière valeur (`stale`, badge dans l'UI), suggestions déjà connues servies depuis le cache partagé, ajout d'une nouvelle ville refusé proprement (503), disjoncteurs ouverts, aucune requête bloquée |
+| `api-panne` | Open-Meteo injoignable (adresses `.invalid`) et cache expiré | villes affichées avec la dernière valeur (`stale`, badge « Données anciennes » : avec le circuit ouvert, on ne prétend pas « mettre à jour »), suggestions déjà connues servies depuis le cache partagé, ajout d'une nouvelle ville refusé proprement (503), disjoncteurs ouverts, aucune requête bloquée |
 | `api-retour` | retour à la normale | disjoncteurs refermés au premier appel réussi, `live` puis `cache` |
 | `bd-panne` | arrêt de PostgreSQL | page servie, météo « autour de vous » toujours disponible (n'utilise pas la base), liste → 503 en moins de 3 s (pas de blocage), alerte `meteo-5xx-utilisateurs` en quelques minutes |
 | `bd-retour` | redémarrage de PostgreSQL | retour automatique, sans redémarrer le backend (le pool écarte les connexions mortes) |
 
+Les messages d'erreur de l'UI affichent une **référence** (début du `request_id`) : collée dans la requête 4
+de `requetes.kql`, elle retrouve le parcours complet de la requête (nginx, Flask, appel à Open-Meteo refusé).
 Après chaque panne, la requête 6 de `requetes.kql` montre les mécanismes qui ont joué (circuit ouvert,
 valeurs servies en mode dégradé, base indisponible). Toujours terminer par `api-retour` / `bd-retour` : le
 pipeline ne change que l'image, une panne laissée active survivrait à un déploiement.

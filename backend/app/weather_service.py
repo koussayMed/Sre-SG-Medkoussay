@@ -103,6 +103,11 @@ class WeatherService:
                 return cached, "stale"
             raise WeatherApiUnavailable("Mise à jour reportée : réessayez dans un instant")
 
+        # API connue comme en panne (circuit ouvert) : inutile de prendre le bail, on sert la dernière valeur.
+        # Sinon l'UI afficherait « mise à jour en cours » pendant toute la panne, ce qui serait faux.
+        if cached and not self._api_available():
+            return cached, "stale"
+
         # Une seule instance rafraîchit une ville donnée ; les autres servent la dernière valeur
         if cached and not self.repository.try_acquire_refresh(city.id, self.lease_s):
             return cached, "refreshing"
@@ -117,6 +122,10 @@ class WeatherService:
 
         self.repository.save_weather(city.id, fresh)  # libère le bail
         return fresh, "live"
+
+    def _api_available(self) -> bool:
+        breaker = getattr(self.client, "breaker", None)
+        return breaker is None or breaker.allow()  # half_open : un appel d'essai passe
 
     def weather_at(self, latitude: float, longitude: float) -> tuple[Weather, str]:
         """Météo à des coordonnées (déjà arrondies par l'appelant), avec cache mémoire et mode dégradé."""

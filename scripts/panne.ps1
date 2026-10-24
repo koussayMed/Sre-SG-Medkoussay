@@ -49,7 +49,9 @@ function Show-State([string]$AppUrl) {
         Write-Host "$time  /api/info en erreur : $($_.Exception.Message)" -ForegroundColor Red
     }
     try {
-        foreach ($city in @(Get-Json "$AppUrl/api/weather" @{ "X-Visitor-Id" = $Visitor })) {
+        # Pas de @(...) ici : PowerShell 5.1 renvoie la liste JSON comme un seul objet, @() l'emboiterait
+        $cities = Get-Json "$AppUrl/api/weather" @{ "X-Visitor-Id" = $Visitor }
+        foreach ($city in $cities) {
             if ($city.weather) {
                 Write-Host ("    {0,-12} {1,6} C   source = {2}" -f $city.name, $city.weather.temperature_c, $city.weather.source)
             } else {
