@@ -1,0 +1,198 @@
+{
+    "root_group": {
+        "name": "",
+        "path": "",
+        "id": "d41d8cd98f00b204e9800998ecf8427e",
+        "groups": {},
+        "checks": {
+                "météo : 200": {
+                    "id": "316fa2a385e654031761fbf05e4ff082",
+                    "passes": 155148,
+                    "fails": 10,
+                    "name": "météo : 200",
+                    "path": "::météo : 200"
+                },
+                "météo : liste de villes": {
+                    "name": "météo : liste de villes",
+                    "path": "::météo : liste de villes",
+                    "id": "79cb159116c530de5fde90f92e1b3381",
+                    "passes": 155148,
+                    "fails": 10
+                },
+                "suggestions : 200": {
+                    "name": "suggestions : 200",
+                    "path": "::suggestions : 200",
+                    "id": "74712606c6f3b30a7f1abe95815685d3",
+                    "passes": 33489,
+                    "fails": 2
+                },
+                "page : 200": {
+                    "name": "page : 200",
+                    "path": "::page : 200",
+                    "id": "c9686b68cd547e10a4394e69e4a275a8",
+                    "passes": 22216,
+                    "fails": 0
+                },
+                "info : 200": {
+                    "name": "info : 200",
+                    "path": "::info : 200",
+                    "id": "eb4ba4297d64b561c18f143d685fd3c6",
+                    "passes": 11125,
+                    "fails": 1
+                }
+            }
+    },
+    "metrics": {
+        "data_received": {
+            "rate": 756002.2339086344,
+            "count": 323359418
+        },
+        "http_req_failed{scenario:montee_en_charge}": {
+            "passes": 13,
+            "fails": 221978,
+            "thresholds": {
+                "rate<0.01": false
+            },
+            "value": 0.00005856093265042277
+        },
+        "http_reqs": {
+            "count": 222142,
+            "rate": 519.3596935683867
+        },
+        "http_req_duration": {
+            "p(95)": 161.22884844999936,
+            "p(99)": 345.5622271299999,
+            "max": 2044.309983,
+            "avg": 47.72138441303836,
+            "med": 27.450083499999998,
+            "p(90)": 94.9002441
+        },
+        "http_req_failed": {
+            "passes": 13,
+            "fails": 222129,
+            "value": 0.00005852112612653168
+        },
+        "iterations": {
+            "count": 221991,
+            "rate": 519.0066612119263
+        },
+        "http_req_failed{endpoint:weather}": {
+            "passes": 10,
+            "fails": 155148,
+            "thresholds": {
+                "rate<0.01": false
+            },
+            "value": 0.00006445043117338455
+        },
+        "vus": {
+            "value": 3,
+            "min": 0,
+            "max": 100
+        },
+        "data_sent": {
+            "count": 11608415,
+            "rate": 27140.040412054735
+        },
+        "http_req_duration{endpoint:weather}": {
+            "max": 2022.83135,
+            "avg": 53.2515141715153,
+            "med": 29.467043,
+            "p(90)": 106.43746120000024,
+            "p(95)": 174.74929294999995,
+            "p(99)": 366.5698114199997,
+            "thresholds": {
+                "p(95)<1500": false
+            }
+        },
+        "http_req_receiving": {
+            "max": 100.736489,
+            "avg": 0.10052345677989731,
+            "med": 0.0808895,
+            "p(90)": 0.1699049,
+            "p(95)": 0.21111324999999972,
+            "p(99)": 0.34286051999999917
+        },
+        "vus_max": {
+            "value": 100,
+            "min": 100,
+            "max": 100
+        },
+        "http_req_failed{endpoint:geocode}": {
+            "passes": 2,
+            "fails": 33489,
+            "thresholds": {
+                "rate<0.01": false
+            },
+            "value": 0.00005971753605446239
+        },
+        "http_req_blocked": {
+            "avg": 0.013370380112713713,
+            "med": 0.00034,
+            "p(90)": 0.000622,
+            "p(95)": 0.000771,
+            "p(99)": 0.0013535899999999965,
+            "max": 108.78848
+        },
+        "checks": {
+            "passes": 377126,
+            "fails": 23,
+            "value": 0.9999390161448128
+        },
+        "http_req_connecting": {
+            "p(99)": 0,
+            "max": 15.54834,
+            "avg": 0.0009879832089384267,
+            "med": 0,
+            "p(90)": 0,
+            "p(95)": 0
+        },
+        "http_req_sending": {
+            "med": 0.100438,
+            "p(90)": 0.177463,
+            "p(95)": 0.21600744999999982,
+            "p(99)": 0.36022385999999945,
+            "max": 14.215452,
+            "avg": 0.11544249480962301
+        },
+        "http_req_waiting": {
+            "med": 27.240265,
+            "p(90)": 94.7072833,
+            "p(95)": 161.0007711499999,
+            "p(99)": 345.36710737999925,
+            "max": 2044.180902,
+            "avg": 47.505418461447846
+        },
+        "iteration_duration": {
+            "avg": 148.4145791212673,
+            "med": 141.062419,
+            "p(90)": 227.7045,
+            "p(95)": 279.982374,
+            "p(99)": 458.4135411000004,
+            "max": 2240.468048
+        },
+        "checks{scenario:montee_en_charge}": {
+            "passes": 377126,
+            "fails": 23,
+            "thresholds": {
+                "rate>0.99": false
+            },
+            "value": 0.9999390161448128
+        },
+        "http_req_duration{expected_response:true}": {
+            "avg": 47.606256945082215,
+            "med": 27.449523,
+            "p(90)": 94.86850400000002,
+            "p(95)": 161.0853315999999,
+            "p(99)": 344.62593828000007,
+            "max": 1671.932773
+        },
+        "http_req_tls_handshaking": {
+            "p(90)": 0,
+            "p(95)": 0,
+            "p(99)": 0,
+            "max": 81.424852,
+            "avg": 0.011458339409026653,
+            "med": 0
+        }
+    }
+}

@@ -234,9 +234,25 @@ Correction : un seul appel à la fois par texte, cache partagé en base entre r�
 si l'API refuse, et un disjoncteur séparé pour le géocodage. Tests de non-régression dans
 `backend/tests/test_suggestions.py` (30 requêtes simultanées → 1 seul appel à l'API).
 
-**Test n° 2 (après correction)** : *à compléter.*
+**Test n° 2 (24 octobre, après correction)** : objectifs tenus.
+
+| Mesure | Test n° 1 | Test n° 2 |
+|---|---|---|
+| Requêtes (charge max : 100 utilisateurs virtuels) | ~ 645/s en pointe | 222 100 au total, 519/s en moyenne |
+| Erreurs | 2 % | **0,0 %** |
+| Vérifications k6 | — | 100 % |
+| Temps de réponse moyen | 58 ms | 47 ms |
+| p95 / p99 | — | 161 ms / 345 ms |
+| Maximum | — | 2 s (pendant un ajout de réplica) |
+| Réplicas pendant la charge | — | **8 backend / 5 frontend** (les plafonds), contre 1 / 1 au repos |
+
+Retour à 1 réplica environ 5 minutes après la fin de la charge (relevé `watch-replicas.ps1` : 8 / 5 jusqu'à
+15:06:55, puis 1 / 3 à 15:07:09 et 1 / 1 à 15:07:53). Le backend a atteint son plafond de 8 réplicas sans
+aucune erreur : le plafond, calé sur le budget de connexions PostgreSQL, a protégé la base. Au-delà de cette
+charge, la prochaine étape serait une offre PostgreSQL supérieure, puis un plafond de réplicas relevé.
 
 Erreurs par service, code et route (Log Analytics, **cae-sre-meteo → Logs**, mode KQL) :
+![alt text](image.png)
 
 ```kusto
 ContainerAppConsoleLogs_CL
