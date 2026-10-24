@@ -44,6 +44,9 @@ export const options = {
   // k6 les affiche en vert ou rouge à la fin et se termine en erreur s'ils ne sont pas tenus.
   thresholds: {
     "http_req_failed{scenario:montee_en_charge}": ["rate<0.01"], // moins de 1 % d'erreurs
+    // Même objectif par route : le résumé montre directement laquelle décroche
+    "http_req_failed{endpoint:weather}": ["rate<0.01"],
+    "http_req_failed{endpoint:geocode}": ["rate<0.01"],
     "http_req_duration{endpoint:weather}": ["p(95)<1500"], // 95 % des listes météo en moins de 1,5 s
     "checks{scenario:montee_en_charge}": ["rate>0.99"],
   },

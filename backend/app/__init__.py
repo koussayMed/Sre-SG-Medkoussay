@@ -53,7 +53,14 @@ def create_app(settings: Settings | None = None, repository=None, weather_client
             forecast_url=settings.forecast_api_url,
             geocoding_url=settings.geocoding_api_url,
             timeout_s=settings.http_timeout_s,
-            breaker=CircuitBreaker(settings.breaker_failure_threshold, settings.breaker_reset_after_s),
+            breaker=CircuitBreaker(
+                settings.breaker_failure_threshold, settings.breaker_reset_after_s, name="open-meteo-forecast"
+            ),
+            geocoding_breaker=CircuitBreaker(
+                settings.breaker_failure_threshold,
+                settings.breaker_reset_after_s,
+                name="open-meteo-geocoding",
+            ),
         )
 
     app = Flask(__name__, static_folder=None)  # API uniquement : les fichiers statiques sont servis par nginx
@@ -68,7 +75,7 @@ def create_app(settings: Settings | None = None, repository=None, weather_client
         ttl_s=settings.weather_cache_ttl_s,
         lease_s=settings.refresh_lease_s,
     )
-    app.extensions["place_search"] = PlaceSearch(weather_client)
+    app.extensions["place_search"] = PlaceSearch(weather_client, repository)
 
     # Derrière nginx et l'ingress Container Apps : récupérer le vrai schéma et l'IP client
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)

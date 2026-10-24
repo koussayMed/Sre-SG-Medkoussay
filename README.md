@@ -59,7 +59,7 @@ flowchart LR
   les images qui tournaient avant. Retour arrière manuel :
   `az containerapp update -n meteo-backend -g rg-sre-meteo --image acrsremeteokoussay.azurecr.io/meteo-backend:<sha>`.
 - **Aucun secret Azure dans GitHub** : connexion par OIDC (fédération d'identité). GitHub présente un jeton
-  signé « dépôt koussayMed/Sre-SG-koussay, environnement production », qu'Azure échange contre un accès de courte
+  signé « dépôt koussayMed/Sre-SG-Medkoussay, environnement production », qu'Azure échange contre un accès de courte
   durée. L'identité du pipeline a seulement `AcrPush` sur le registre et `Contributor` sur le groupe de
   ressources de l'application. Les trois valeurs stockées dans GitHub (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
   `AZURE_SUBSCRIPTION_ID`) sont des identifiants, pas des mots de passe.
@@ -101,11 +101,13 @@ base ni écrites dans les logs (nginx et Flask ne journalisent que le chemin, sa
 mise en cache 10 minutes en mémoire par coordonnées arrondies : les visiteurs proches partagent l'entrée.
 
 **Suggestions.** Le front attend 250 ms après la dernière frappe, annule la requête précédente et garde les
-réponses de la session en mémoire. Le backend met chaque recherche en cache 24 h (les noms de villes ne changent
-pas) : la même saisie par 1 000 visiteurs ne coûte qu'un appel à Open-Meteo. Le géocodage d'Open-Meteo ne
-renvoie que les correspondances exactes pour 2 lettres et fait une recherche approchée dès 3 : l'interface l'indique.
-À l'ajout, le backend ne fait jamais confiance aux coordonnées envoyées par le navigateur : il retrouve la
-suggestion par son `id` dans la réponse d'Open-Meteo (souvent déjà en cache).
+réponses de la session en mémoire. Côté backend, trois niveaux, du plus rapide au plus coûteux :
+cache mémoire du processus → **cache partagé en base** (`geocode_cache`, 24 h) → Open-Meteo. Un **seul appel à
+la fois par texte** et par processus : 50 requêtes simultanées pour « par » attendent le résultat du premier
+appel au lieu d'appeler l'API 50 fois. API indisponible : on sert le dernier résultat connu, même expiré.
+Le géocodage d'Open-Meteo ne renvoie que les correspondances exactes pour 2 lettres et fait une recherche
+approchée dès 3 : l'interface l'indique. À l'ajout, le backend ne fait jamais confiance aux coordonnées
+envoyées par le navigateur : il retrouve la suggestion par son `id` dans la réponse d'Open-Meteo (en cache).
 
 **Panneau technique.** Ajouter `?tech` à l'URL affiche un bloc caché aux visiteurs : version, réplica qui
 répond, et un bouton qui envoie 20 requêtes puis compte les réponses par réplica (utile pour montrer le scale-out).
@@ -132,7 +134,8 @@ Chaque météo indique sa `source` :
 - **L'API externe est une dépendance fragile**, donc protégée :
   - timeouts courts (connexion 1,5 s, lecture 2,5 s) ; 2 retries sur erreurs de connexion et 5xx seulement
     (pas sur timeout de lecture, qui doublerait la latence, ni sur 429, qui aggraverait le quota) ;
-  - circuit breaker : après 3 échecs consécutifs, plus d'appel pendant 30 s, échec immédiat ;
+  - circuit breaker : après 3 échecs consécutifs, plus d'appel pendant 30 s, échec immédiat. **Un disjoncteur
+    par API** (géocodage, météo) : des refus sur les suggestions ne bloquent pas le rafraîchissement météo ;
   - cache en base (10 min) : moins de latence et de quota consommé ;
   - mode dégradé : API en panne → on sert la dernière météo connue, marquée `stale`.
 - **Tenue en charge** (voir [Scalabilité](#scalabilité)) : endpoint agrégé sans N+1, bail anti-rafale en base,
@@ -214,6 +217,36 @@ docker run --rm -p 5665:5665 -v "${PWD}\loadtest:/scripts" `
 Pendant le test : tableau de bord k6 en direct sur http://localhost:5665, réplicas dans le terminal 1, et dans
 le portail Azure, **meteo-backend → Monitoring → Metrics → Replica Count** (agrégation Max). Après le test :
 rapport HTML et résumé JSON dans `loadtest/results/`.
+
+### Résultats
+
+**Test n° 1 (23 octobre)** : environ **645 requêtes/s** en pointe, **58 ms** de temps de réponse moyen,
+mais **2 % d'erreurs** (objectif : < 1 %). Les logs (requête ci-dessous) ont montré que presque toutes venaient
+de `/api/geocode` : 503 `weather_api_unavailable`, circuit breaker ouvert 53 fois. La météo, elle, a tenu
+(17 erreurs `/api/weather` au moment des ajouts de réplicas, soit environ 0,007 %).
+
+Cause : à chaque scale-out, le nouveau réplica démarrait avec un cache de suggestions vide, et toutes les
+requêtes simultanées pour le même texte appelaient Open-Meteo en parallèle (8 réplicas × 2 processus). Ces
+rafales déclenchaient les limites de l'API ; un échec n'étant pas mis en cache, le phénomène s'entretenait.
+C'est l'effet « ruée » déjà traité pour la météo par le bail en base, mais pas pour les suggestions.
+
+Correction : un seul appel à la fois par texte, cache partagé en base entre réplicas, résultat expiré servi
+si l'API refuse, et un disjoncteur séparé pour le géocodage. Tests de non-régression dans
+`backend/tests/test_suggestions.py` (30 requêtes simultanées → 1 seul appel à l'API).
+
+**Test n° 2 (après correction)** : *à compléter.*
+
+Erreurs par service, code et route (Log Analytics, **cae-sre-meteo → Logs**, mode KQL) :
+
+```kusto
+ContainerAppConsoleLogs_CL
+| where TimeGenerated > ago(4h)
+| extend e = parse_json(Log_s)
+| where toint(e.status) >= 400 or tostring(e.level) in ("WARNING", "ERROR")
+| summarize nb = count() by app = ContainerAppName_s, status = toint(e.status), message = tostring(e.message),
+    erreur = tostring(e.error), path = tostring(e.path)
+| order by nb desc
+```
 
 Requêtes par réplica pendant le test (Log Analytics, **cae-sre-meteo → Logs**) :
 

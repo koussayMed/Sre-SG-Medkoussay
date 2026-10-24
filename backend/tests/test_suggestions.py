@@ -1,10 +1,16 @@
 """Suggestions de villes pendant la saisie (/api/geocode) et ajout de la suggestion choisie."""
 
-import pytest
-from fakes import KNOWN_PLACES
+import threading
+import time
 
+import pytest
+import requests
+from fakes import KNOWN_PLACES, FakeRepository, FakeWeatherClient
+
+from app.errors import WeatherApiUnavailable
 from app.models import GeoResult
 from app.weather_client import CircuitBreaker, OpenMeteoClient
+from app.weather_service import PlaceSearch
 
 SFAX = GeoResult(2467454, "Sfax", "Tunisie", 34.74, 10.76, "Sfax")
 SFANTU = GeoResult(667268, "Sfântu Gheorghe", "Roumanie", 45.87, 25.79)
@@ -109,3 +115,100 @@ def test_client_search_parses_region():
     client = OpenMeteoClient("https://f", "https://g", session=Session(), breaker=CircuitBreaker())
     [geo] = client.search("sfa")
     assert (geo.name, geo.region, geo.country) == ("Sfax", "Sfax", "Tunisie")
+
+
+# --- Tenue en charge des suggestions (régression trouvée par le test de charge k6) --------------
+
+
+class Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+class SlowClient(FakeWeatherClient):
+    """L'API met un peu de temps à répondre : laisse aux requêtes simultanées le temps d'arriver."""
+
+    def search(self, name, count=8):
+        time.sleep(0.2)
+        return super().search(name, count)
+
+
+def test_simultaneous_requests_make_a_single_api_call():
+    # 30 visiteurs tapent « sf » en même temps sur un réplica qui vient de démarrer (cache vide)
+    client = SlowClient()
+    search = PlaceSearch(client, FakeRepository())
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(search.suggest("sf"))) for _ in range(30)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert client.search_calls == 1
+    assert len(results) == 30 and all(r == [SFAX, SFANTU] for r in results)
+
+
+def test_new_replica_reuses_the_shared_cache():
+    client, repo = FakeWeatherClient(), FakeRepository()
+    PlaceSearch(client, repo).suggest("sf")  # réplica 1
+    assert PlaceSearch(client, repo).suggest("sf") == [SFAX, SFANTU]  # réplica 2, cache mémoire vide
+    assert client.search_calls == 1
+
+
+def test_stale_suggestions_served_when_api_down():
+    clock, client = Clock(), FakeWeatherClient()
+    search = PlaceSearch(client, None, ttl_s=60, monotonic=clock)
+    search.suggest("sf")
+    clock.now += 3600  # résultat expiré
+    client.down = True
+    assert search.suggest("sf") == [SFAX, SFANTU]
+
+
+def test_stale_shared_suggestions_served_to_a_new_replica_when_api_down():
+    clock, client, repo = Clock(), FakeWeatherClient(), FakeRepository()
+    repo.clock = clock
+    PlaceSearch(client, repo, ttl_s=60, monotonic=clock).suggest("sf")
+    clock.now += 3600
+    client.down = True
+    assert PlaceSearch(client, repo, ttl_s=60, monotonic=clock).suggest("sf") == [SFAX, SFANTU]
+
+
+def test_suggestions_work_without_the_database():
+    client, repo = FakeWeatherClient(), FakeRepository()
+    repo.down = True
+    assert PlaceSearch(client, repo).suggest("sf") == [SFAX, SFANTU]
+
+
+def test_geocoding_failures_do_not_block_weather():
+    # Un disjoncteur par API : les 429 du géocodage n'empêchent pas de rafraîchir la météo
+    class Session:
+        def get(self, url, params=None, timeout=None):
+            if url == "https://g":
+                raise requests.ConnectionError("429")
+
+            class R:
+                def raise_for_status(self):
+                    pass
+
+                def json(self):
+                    return {
+                        "current": {"temperature_2m": 9.5, "wind_speed_10m": 5, "time": "2026-10-24T10:00"}
+                    }
+
+            return R()
+
+    client = OpenMeteoClient(
+        "https://f",
+        "https://g",
+        session=Session(),
+        breaker=CircuitBreaker(failure_threshold=2),
+        geocoding_breaker=CircuitBreaker(failure_threshold=2),
+    )
+    for _ in range(3):
+        with pytest.raises(WeatherApiUnavailable):
+            client.search("par")
+    assert client.geocoding_breaker.state == "open"
+    assert client.current_weather(48.85, 2.35).temperature_c == 9.5
+    assert client.breaker.state == "closed"

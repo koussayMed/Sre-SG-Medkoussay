@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 
 from app.errors import Conflict, DatabaseUnavailable, WeatherApiUnavailable
@@ -24,6 +25,8 @@ class FakeRepository:
         self.down = False  # simule une panne de la base
         self.leases: set[int] = set()  # lieux dont le bail de rafraîchissement est pris
         self.queries = 0  # nombre d'appels « SQL » (pour vérifier l'absence de N+1)
+        self.geocode: dict[str, tuple[list, float]] = {}  # texte -> (résultats, horodatage)
+        self.clock = time.monotonic
 
     def _check(self):
         self.queries += 1
@@ -93,6 +96,15 @@ class FakeRepository:
             self.cache[city_id] = weather
             self.leases.discard(city_id)
 
+    def get_geocode(self, query):
+        self._check()
+        entry = self.geocode.get(query)
+        return (entry[0], self.clock() - entry[1]) if entry else None
+
+    def save_geocode(self, query, results):
+        self._check()
+        self.geocode[query] = (list(results), self.clock())
+
 
 KNOWN_PLACES = {
     "lille": GeoResult(2998324, "Lille", "France", 50.63297, 3.05858),
@@ -107,6 +119,7 @@ class FakeWeatherClient:
         self.search_calls = 0
         self.temperature = 14.2
         self.breaker = CircuitBreaker()
+        self.geocoding_breaker = CircuitBreaker()
 
     def search(self, name, count=8):
         self.search_calls += 1

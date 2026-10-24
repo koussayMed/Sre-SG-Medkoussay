@@ -7,6 +7,7 @@ et tournent sans base. Les tests d'intégration (tests/integration) visent un vr
 from __future__ import annotations
 
 import atexit
+import dataclasses
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -14,6 +15,7 @@ from contextlib import contextmanager
 import psycopg
 from psycopg import errors as pg_errors
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool, PoolTimeout
 
 from .errors import Conflict, DatabaseUnavailable
@@ -56,6 +58,15 @@ _UPSERT_WEATHER = (
 _ACQUIRE_REFRESH_LEASE = (
     "UPDATE weather_cache SET refresh_lease_until = now() + %s * interval '1 second' "
     "WHERE city_id = %s AND (refresh_lease_until IS NULL OR refresh_lease_until < now())"
+)
+
+
+_SELECT_GEOCODE = (
+    "SELECT results, EXTRACT(EPOCH FROM now() - fetched_at) AS age_s FROM geocode_cache WHERE query = %s"
+)
+_UPSERT_GEOCODE = (
+    "INSERT INTO geocode_cache (query, results, fetched_at) VALUES (%s, %s, now()) "
+    "ON CONFLICT (query) DO UPDATE SET results = EXCLUDED.results, fetched_at = EXCLUDED.fetched_at"
 )
 
 
@@ -194,3 +205,17 @@ class PostgresRepository:
         except pg_errors.ForeignKeyViolation:
             # La ville a été supprimée entre-temps : rien à mettre en cache
             log.info("city deleted before cache write", extra={"city_id": city_id})
+
+    # --- cache des suggestions (géocodage), partagé entre réplicas -------------------
+    def get_geocode(self, query: str) -> tuple[list[GeoResult], float] | None:
+        """(résultats, âge en secondes) ou None si ce texte n'a jamais été cherché."""
+        with self._conn() as conn:
+            row = conn.execute(_SELECT_GEOCODE, (query,)).fetchone()
+        if row is None:
+            return None
+        return [GeoResult(**item) for item in row["results"]], float(row["age_s"])
+
+    def save_geocode(self, query: str, results: list[GeoResult]) -> None:
+        payload = Jsonb([dataclasses.asdict(geo) for geo in results])
+        with self._conn() as conn:
+            conn.execute(_UPSERT_GEOCODE, (query, payload))

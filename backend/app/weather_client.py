@@ -5,7 +5,8 @@ Une dépendance externe peut être lente ou tomber. Trois protections :
 - retries bornés, uniquement sur erreurs transitoires (GET idempotent) ;
 - circuit breaker : après N échecs consécutifs, on n'appelle plus l'API pendant
   quelques secondes et on échoue tout de suite. Sous charge, cela évite que tous
-  les threads gunicorn restent bloqués sur une API en panne.
+  les threads gunicorn restent bloqués sur une API en panne. Un disjoncteur par API
+  (géocodage, météo) : une limite atteinte sur les suggestions ne bloque pas la météo.
 """
 
 from __future__ import annotations
@@ -39,7 +40,9 @@ class CircuitBreaker:
         failure_threshold: int = 3,
         reset_after_s: float = 30,
         clock: Callable[[], float] = time.monotonic,
+        name: str = "open-meteo",
     ):
+        self.name = name
         self.failure_threshold = failure_threshold
         self.reset_after_s = reset_after_s
         self._clock = clock
@@ -69,7 +72,7 @@ class CircuitBreaker:
             self._failures += 1
             if self._failures >= self.failure_threshold:
                 if self._opened_at is None:
-                    log.warning("circuit breaker opened", extra={"dependency": "open-meteo"})
+                    log.warning("circuit breaker opened", extra={"dependency": self.name})
                 self._opened_at = self._clock()  # (ré)ouvre, y compris après un essai half_open raté
 
 
@@ -101,12 +104,14 @@ class OpenMeteoClient:
         timeout_s: float = 2.5,
         session: requests.Session | None = None,
         breaker: CircuitBreaker | None = None,
+        geocoding_breaker: CircuitBreaker | None = None,
     ):
         self.forecast_url = forecast_url
         self.geocoding_url = geocoding_url
         self.timeout = (min(1.5, timeout_s), timeout_s)  # (connexion, lecture)
         self.session = session or build_session()
-        self.breaker = breaker or CircuitBreaker()
+        self.breaker = breaker or CircuitBreaker(name="open-meteo-forecast")  # météo
+        self.geocoding_breaker = geocoding_breaker or CircuitBreaker(name="open-meteo-geocoding")
 
     def search(self, name: str, count: int = 8) -> list[GeoResult]:
         """Villes dont le nom correspond (Open-Meteo : correspondance exacte à 2 lettres, approchée dès 3)."""
@@ -158,7 +163,8 @@ class OpenMeteoClient:
             raise WeatherApiUnavailable("Réponse météo invalide") from exc
 
     def _get_json(self, endpoint: str, url: str, params: dict) -> dict:
-        if not self.breaker.allow():
+        breaker = self.geocoding_breaker if endpoint == "geocoding" else self.breaker
+        if not breaker.allow():
             log.info(
                 "dependency call skipped",
                 extra={"dependency": "open-meteo", "endpoint": endpoint, "outcome": "circuit_open"},
@@ -175,10 +181,10 @@ class OpenMeteoClient:
                 raise ValueError("payload JSON inattendu")
         except (requests.RequestException, ValueError) as exc:
             outcome = type(exc).__name__
-            self.breaker.record_failure()
+            breaker.record_failure()
             raise WeatherApiUnavailable() from exc
         else:
-            self.breaker.record_success()
+            breaker.record_success()
             return data
         finally:
             log.info(

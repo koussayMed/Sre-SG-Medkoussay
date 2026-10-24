@@ -25,7 +25,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from .errors import WeatherApiUnavailable
+from .errors import DatabaseUnavailable, WeatherApiUnavailable
 from .models import City, Weather
 
 log = logging.getLogger(__name__)
@@ -151,29 +151,94 @@ class WeatherService:
 
 
 class PlaceSearch:
-    """Suggestions de villes pendant la saisie, avec cache.
+    """Suggestions de villes pendant la saisie, avec cache à deux niveaux.
 
-    Une saisie déclenche une requête par pause de frappe : sans cache, chaque visiteur consommerait le quota
-    de l'API de géocodage. Les résultats changent rarement, on les garde donc 24 h par texte saisi.
+    Une saisie déclenche une requête par pause de frappe : sans cache, chaque visiteur consommerait le
+    quota de l'API de géocodage. Les résultats changent rarement : on les garde 24 h par texte saisi.
+
+    1. Cache mémoire du processus : le plus rapide, mais vide au démarrage d'un réplica.
+    2. Cache en base (table geocode_cache), partagé : un réplica ajouté par l'autoscaling réutilise ce
+       que les autres ont déjà trouvé, au lieu de rappeler l'API.
+    3. Open-Meteo, en dernier recours. Un seul appel à la fois par texte et par processus : les
+       requêtes simultanées pour « par » attendent le résultat du premier appel (sans cela, un test de
+       charge a provoqué des centaines d'appels identiques, puis des refus 429 de l'API).
+    API indisponible : on sert le dernier résultat connu, même expiré, s'il existe.
     """
 
-    def __init__(self, client, ttl_s: int = 24 * 3600, max_entries: int = 2048, monotonic=time.monotonic):
+    _STRIPES = 64  # verrous par « tranche » de textes : nombre borné, quelle que soit la saisie
+
+    def __init__(
+        self,
+        client,
+        repository=None,
+        ttl_s: int = 24 * 3600,
+        max_entries: int = 2048,
+        monotonic=time.monotonic,
+        wait_s: float = 8.0,
+    ):
         self.client = client
+        self.repository = repository
         self.ttl_s = ttl_s
+        self.wait_s = wait_s  # attente max du résultat d'un appel déjà en cours
         self.cache = TTLCache(max_entries=max_entries, clock=monotonic)
+        self._locks = [threading.Lock() for _ in range(self._STRIPES)]
 
     @staticmethod
     def _key(text: str) -> str:
         return " ".join(text.split()).casefold()
 
+    def _fresh(self, entry) -> bool:
+        return entry is not None and entry[1] < self.ttl_s
+
+    def _read_shared(self, key: str):
+        if self.repository is None:
+            return None
+        try:
+            return self.repository.get_geocode(key)
+        except DatabaseUnavailable:
+            return None  # les suggestions ne dépendent pas de la base : on passe à l'API
+
+    def _write_shared(self, key: str, results: list) -> None:
+        if self.repository is None:
+            return
+        try:
+            self.repository.save_geocode(key, results)
+        except DatabaseUnavailable:
+            log.info("geocode cache not saved", extra={"reason": "database_unavailable"})
+
     def suggest(self, text: str) -> list:
         key = self._key(text)
-        cached = self.cache.get(key)
-        if cached and cached[1] < self.ttl_s:
-            return cached[0]
-        results = self.client.search(text, count=8)
-        self.cache.set(key, results)
-        return results
+        memory = self.cache.get(key)
+        if self._fresh(memory):
+            return memory[0]
+
+        lock = self._locks[hash(key) % self._STRIPES]
+        if not lock.acquire(timeout=self.wait_s):
+            if memory:
+                return memory[0]
+            raise WeatherApiUnavailable("Suggestions momentanément indisponibles")
+        try:
+            # Pendant l'attente, un autre thread a peut-être déjà obtenu le résultat
+            memory = self.cache.get(key)
+            if self._fresh(memory):
+                return memory[0]
+            shared = self._read_shared(key)
+            if self._fresh(shared):
+                self.cache.set(key, shared[0])
+                return shared[0]
+            try:
+                results = self.client.search(text, count=8)
+            except WeatherApiUnavailable:
+                stale = memory or shared
+                if stale:
+                    log.info("serving stale suggestions", extra={"dependency": "open-meteo-geocoding"})
+                    return stale[0]
+                raise
+            self.cache.set(key, results)
+            self._write_shared(key, results)
+            return results
+        finally:
+            lock.release()
 
     def resolve(self, name: str, external_id: int | None = None):
         """La ville choisie dans les suggestions (par identifiant), sinon le meilleur résultat pour ce nom.

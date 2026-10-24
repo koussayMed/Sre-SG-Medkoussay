@@ -127,3 +127,12 @@ def test_places_are_shared_between_visitors(repository):
     assert repository.delete_city(mine.id, V1) is True
     assert repository.list_cities(V1) == []
     assert repository.list_cities(V2) == [theirs]  # la liste de l'autre visiteur est intacte
+
+
+def test_geocode_cache_roundtrip(repository):
+    assert repository.get_geocode("lil") is None
+    repository.save_geocode("lil", [LILLE])
+    results, age_s = repository.get_geocode("lil")
+    assert results == [LILLE] and 0 <= age_s < 60
+    repository.save_geocode("lil", [])  # « aucune ville » se met aussi en cache
+    assert repository.get_geocode("lil")[0] == []

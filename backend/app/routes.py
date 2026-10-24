@@ -77,6 +77,7 @@ def readyz():
         "checks": {"database": database},
         "info": {
             "weather_api_circuit": current_app.extensions["weather_client"].breaker.state,
+            "geocoding_api_circuit": current_app.extensions["weather_client"].geocoding_breaker.state,
             # Pool de ce worker : requests_waiting > 0 = threads qui attendent une connexion BD
             "db_pool": _repo().pool_stats(),
         },
