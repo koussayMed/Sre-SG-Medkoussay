@@ -1,0 +1,89 @@
+// Requêtes Log Analytics pour Météo des villes.
+// Où : portail Azure > cae-sre-meteo > Logs, mode KQL. Ajuster la période avec la ligne "ago(...)".
+// Les deux services écrivent une ligne JSON par événement sur stdout ; Container Apps les range dans
+// ContainerAppConsoleLogs_CL (colonne Log_s). Le request_id est le même côté nginx et côté Flask.
+
+
+// 1. Santé vue des utilisateurs : trafic et taux d'erreur 5xx par minute (logs nginx du frontend)
+ContainerAppConsoleLogs_CL
+| where TimeGenerated > ago(1h) and ContainerAppName_s == "meteo-frontend"
+| extend e = parse_json(Log_s)
+| where tostring(e.message) == "request completed"
+| summarize requetes = count(), erreurs_5xx = countif(toint(e.status) >= 500) by bin(TimeGenerated, 1m)
+| extend taux_erreur_pct = round(100.0 * erreurs_5xx / requetes, 2)
+| render timechart
+
+
+// 2. Latence par route (backend) : médiane, p95, p99
+ContainerAppConsoleLogs_CL
+| where TimeGenerated > ago(1h) and ContainerAppName_s == "meteo-backend"
+| extend e = parse_json(Log_s)
+| where tostring(e.message) == "request completed" and isnotempty(tostring(e.route))
+| summarize requetes = count(),
+            p50_ms = percentile(todouble(e.duration_ms), 50),
+            p95_ms = percentile(todouble(e.duration_ms), 95),
+            p99_ms = percentile(todouble(e.duration_ms), 99)
+    by route = tostring(e.route)
+| order by requetes desc
+
+
+// 3. Erreurs par service, code et route (le diagnostic du test de charge n° 1)
+ContainerAppConsoleLogs_CL
+| where TimeGenerated > ago(4h)
+| extend e = parse_json(Log_s)
+| where toint(e.status) >= 400 or tostring(e.level) in ("WARNING", "ERROR")
+| summarize nb = count() by app = ContainerAppName_s, status = toint(e.status), message = tostring(e.message),
+    erreur = tostring(e.error), path = tostring(e.path)
+| order by nb desc
+
+
+// 4. Suivre UNE requête de bout en bout : nginx -> Flask -> appels à Open-Meteo
+// Le request_id se trouve dans l'en-tête de réponse X-Request-ID (outils du navigateur, onglet Réseau)
+// ou dans le corps de toute réponse d'erreur JSON.
+let rid = "COLLER-ICI-LE-REQUEST-ID";
+ContainerAppConsoleLogs_CL
+| where TimeGenerated > ago(1d) and Log_s has rid
+| extend e = parse_json(Log_s)
+| project TimeGenerated, service = ContainerAppName_s, replica = ContainerGroupName_s,
+    message = tostring(e.message), status = toint(e.status), duree_ms = todouble(e.duration_ms),
+    dependance = tostring(e.dependency), resultat = tostring(e.outcome)
+| order by TimeGenerated asc
+
+
+// 5. Dépendance externe : appels à Open-Meteo par API et par résultat (succès, timeout, circuit ouvert...)
+ContainerAppConsoleLogs_CL
+| where TimeGenerated > ago(4h) and ContainerAppName_s == "meteo-backend"
+| extend e = parse_json(Log_s)
+| where tostring(e.message) in ("dependency call", "dependency call skipped")
+| summarize appels = count(), p95_ms = percentile(todouble(e.duration_ms), 95)
+    by api = tostring(e.endpoint), resultat = tostring(e.outcome)
+| order by appels desc
+
+
+// 6. Mécanismes de résilience en action : circuit ouvert, valeurs servies en mode dégradé, base indisponible
+ContainerAppConsoleLogs_CL
+| where TimeGenerated > ago(4h) and ContainerAppName_s == "meteo-backend"
+| extend e = parse_json(Log_s)
+| where tostring(e.message) in ("circuit breaker opened", "serving stale weather", "serving stale suggestions",
+    "database unavailable")
+| summarize nb = count() by bin(TimeGenerated, 1m), evenement = tostring(e.message)
+| render columnchart
+
+
+// 7. Répartition de la charge entre réplicas (scaling)
+ContainerAppConsoleLogs_CL
+| where TimeGenerated > ago(1h) and ContainerAppName_s == "meteo-backend"
+| extend e = parse_json(Log_s)
+| where tostring(e.message) == "request completed"
+| summarize requetes = count() by bin(TimeGenerated, 30s), replica = ContainerGroupName_s
+| render timechart
+
+
+// 8. Déploiements et démarrages : migrations appliquées, versions démarrées, par révision
+ContainerAppConsoleLogs_CL
+| where TimeGenerated > ago(1d) and ContainerAppName_s == "meteo-backend"
+| extend e = parse_json(Log_s)
+| where tostring(e.message) in ("application started", "migration applied", "migrations up to date")
+| project TimeGenerated, revision = RevisionName_s, replica = ContainerGroupName_s,
+    message = tostring(e.message), detail = tostring(e.version)  // version de l'app ou de la migration
+| order by TimeGenerated desc

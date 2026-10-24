@@ -252,7 +252,6 @@ aucune erreur : le plafond, calé sur le budget de connexions PostgreSQL, a prot
 charge, la prochaine étape serait une offre PostgreSQL supérieure, puis un plafond de réplicas relevé.
 
 Erreurs par service, code et route (Log Analytics, **cae-sre-meteo → Logs**, mode KQL) :
-![alt text](image.png)
 
 ```kusto
 ContainerAppConsoleLogs_CL
@@ -274,6 +273,53 @@ ContainerAppConsoleLogs_CL
 | summarize requetes = count() by bin(TimeGenerated, 30s), replica = ContainerGroupName_s
 | render timechart
 ```
+
+## Observabilité et alertes
+
+**Logs.** Les deux services écrivent une ligne JSON par événement sur stdout. Container Apps les envoie dans
+Log Analytics (table `ContainerAppConsoleLogs_CL`). Chaque requête porte un `request_id` : nginx le génère (ou
+le reprend), Flask le réutilise dans tous ses logs (accès, appels à Open-Meteo, erreurs) et le renvoie dans
+l'en-tête `X-Request-ID` et dans les réponses d'erreur. On suit donc une requête de bout en bout.
+Les coordonnées des visiteurs ne sont jamais journalisées.
+
+**Métriques.** Celles de la plateforme (requêtes par code HTTP, réplicas, redémarrages, CPU et mémoire ;
+connexions et CPU de PostgreSQL), plus l'état interne exposé par `/readyz` : disjoncteurs et saturation du pool
+de connexions (`requests_waiting`).
+
+**Requêtes prêtes à l'emploi** dans [`observability/requetes.kql`](observability/requetes.kql) (portail :
+**cae-sre-meteo → Logs**, mode KQL) : taux d'erreur vu des utilisateurs, latence p50/p95/p99 par route, erreurs
+par service et route, suivi d'une requête par son `request_id`, appels à Open-Meteo par résultat, mécanismes de
+résilience (circuit ouvert, mode dégradé), charge par réplica, démarrages et migrations.
+
+**Alertes** (`infra/alerts-setup.ps1 -Email ...`, Azure Monitor, envoi par email) :
+
+| Alerte | Condition | Sévérité | Ce qu'elle signale |
+|---|---|---|---|
+| `meteo-5xx-utilisateurs` | plus de 10 réponses 5xx en 5 min sur le frontend | 1 | les utilisateurs voient des erreurs |
+| `meteo-backend-plafond-replicas` | backend à 8 réplicas pendant 15 min | 2 | capacité : la base devient le goulot |
+| `meteo-backend-redemarrages` | plus de 3 redémarrages en 15 min | 2 | plantages ou sondes en échec |
+| `meteo-postgres-connexions` | 30 connexions actives ou plus | 2 | budget de connexions presque épuisé (limite 35) |
+
+On alerte sur ce que vivent les utilisateurs (5xx) et sur les limites connues de l'architecture (plafond de
+réplicas, connexions), pas sur chaque erreur isolée : une panne d'Open-Meteo, absorbée par le mode dégradé,
+ne réveille personne ; elle se voit dans les logs (requête 6).
+
+## Pannes en production : démonstration
+
+`scripts/panne.ps1` simule les pannes sur l'environnement Azure. Dans un 2e terminal,
+`.\scripts\panne.ps1 -Action etat -Suivre` affiche toutes les 5 s la version, le réplica qui répond et la
+source de la météo de chaque ville.
+
+| Action | Ce qui est simulé | Comportement attendu |
+|---|---|---|
+| `api-panne` | Open-Meteo injoignable (adresses `.invalid`) et cache expiré | villes affichées avec la dernière valeur (`stale`, badge dans l'UI), suggestions déjà connues servies depuis le cache partagé, ajout d'une nouvelle ville refusé proprement (503), disjoncteurs ouverts, aucune requête bloquée |
+| `api-retour` | retour à la normale | disjoncteurs refermés au premier appel réussi, `live` puis `cache` |
+| `bd-panne` | arrêt de PostgreSQL | page servie, météo « autour de vous » toujours disponible (n'utilise pas la base), liste → 503 en moins de 3 s (pas de blocage), alerte `meteo-5xx-utilisateurs` en quelques minutes |
+| `bd-retour` | redémarrage de PostgreSQL | retour automatique, sans redémarrer le backend (le pool écarte les connexions mortes) |
+
+Après chaque panne, la requête 6 de `requetes.kql` montre les mécanismes qui ont joué (circuit ouvert,
+valeurs servies en mode dégradé, base indisponible). Toujours terminer par `api-retour` / `bd-retour` : le
+pipeline ne change que l'image, une panne laissée active survivrait à un déploiement.
 
 ## Tester les pannes en local
 
@@ -357,4 +403,9 @@ TEST_DATABASE_URL=postgresql://meteo:<mot_de_passe>@localhost:55432/meteo pytest
   Amélioration : tâche de nettoyage périodique.
 - Le cache « météo à ma position » est en mémoire, propre à chaque réplica.
 - Pas de rate limiting.
+- Sondes Container Apps par défaut (TCP) : un réplica reçoit du trafic dès que son port écoute. Amélioration :
+  sondes HTTP `/healthz` (liveness) et `/readyz` (readiness, vérifie la base), déclarées en YAML.
+- PostgreSQL joint par son adresse publique, limitée aux services Azure par le pare-feu. Amélioration :
+  réseau virtuel et point de terminaison privé (offre plus chère).
+- Les alertes partent par email uniquement. Amélioration : Teams ou outil d'astreinte via le groupe d'actions.
 - Open-Meteo gratuit : usage non commercial, environ 10 000 appels par jour, d'où le cache.
